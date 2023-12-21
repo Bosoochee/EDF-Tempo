@@ -18,5 +18,5 @@ Boitier LED pour indiquer la couleur du jour de l'abonnement Tempo d'EDF à part
    - Heure creuse : pin GIOP33
    - Heure pleine : pin GIOP33
 
-### Installation
+## Installation
    - Indiquer le SSID et le mot de passe de votre WIFI local dans le code ligne 29et 30 (variables SSID_NAME et SSID_PASS)
