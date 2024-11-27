@@ -1,48 +1,63 @@
 #include <WiFi.h>
+#include <WiFiClient.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Ethernet.h>
 #include <ESP32Ping.h>
 #include <ArduinoJson.h>                          // Pour l'extraction simple des données Json reçues par les requêtes HTTP
-#include <TimeLib.h>                              // Pour la gestion de la date et de l'heure
 
 //Uncomment to read debug messages
 //#define DEBUG
 
 // TODO :
-//    Verifier la mise à l'heure et le passage heure hiver/ete (NON TESTE):
 //    Connecter le WIFI avec le bouton WSP de la BOX
-//    Améliorer le server WEB
 
 // Define NTP Client to get time
 const char* ntpServer = "pool.ntp.org";
-unsigned int Actualmin = 0;
-unsigned int Actualsec = 0;
-  
-//// WEB SERVER ////
-WiFiServer server(80);      // Set web server port number to 80
+time_t moment;                               // utilisé pour stocker la date et l'heure au format unix
+struct tm loc;                               // Structure qui contient les informations de l'heure et de la date
+struct tm loc2;                              // Structure qui contient les informations de l'heure et de la date de dans 2 jours
 
 // System time for sending data
 // WIFI connection
 const char* HOST_NAME = "EDFTempo";
 const char* SSID_NAME = "XXXXXXXXXXXXXXXX";     // WiFi SSID Name
 const char* SSID_PASS = "YYYYYYYYYYYYYYYY";     // WiFi SSID Password
+
 volatile int waitMaxWifi = 0;
 bool isWIFIconnected = false;
 
-/*
-  Jblanc=`curl -X 'GET' "https://particulier.edf.fr/services/rest/referentiel/getNbTempoDays?TypeAlerte=TEMPO" -H 'accept: application/json' | jq -r '.PARAM_NB_J_BLANC'`
-  Jbleu=`curl -X 'GET' "https://particulier.edf.fr/services/rest/referentiel/getNbTempoDays?TypeAlerte=TEMPO" -H 'accept: application/json' | jq -r '.PARAM_NB_J_BLEU'`
-  Jrouge=`curl -X 'GET' "https://particulier.edf.fr/services/rest/referentiel/getNbTempoDays?TypeAlerte=TEMPO" -H 'accept: application/json' | jq -r '.PARAM_NB_J_ROUGE'`
+// ******* Valeurs nécessaires à l'accès à l'API "Tempo Like Supply Contract" de RTE *******
+// ID Client et ID Secret en base 64, créées sur le site de RTE avec le bouton "Copier en base 64"
+#define identificationRTE   "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ=="
 
-  now=$(date +'%Y-%m-%d')
-  #now="2023-02-01"       # BLANC
-  #now="2023-02-09"       # ROUGE
+const char * idRTE = "Basic " identificationRTE;
 
-  TodayC=`curl -X 'GET' "https://particulier.edf.fr/services/rest/referentiel/searchTempoStore?dateRelevant=$now" -H 'accept: application/json' | jq -r '.couleurJourJ'`
-  TomorrowC=`curl -X 'GET' "https://particulier.edf.fr/services/rest/referentiel/searchTempoStore?dateRelevant=$now" -H 'accept: application/json' | jq -r '.couleurJourJ1'`
-*/
+// Certificat racine (format PEM) de https://digital.iservices.rte-france.com
+const char* root_ca = \
+                      "-----BEGIN CERTIFICATE-----\n" \
+                      "MIIDXzCCAkegAwIBAgILBAAAAAABIVhTCKIwDQYJKoZIhvcNAQELBQAwTDEgMB4G\n" \
+                      "A1UECxMXR2xvYmFsU2lnbiBSb290IENBIC0gUjMxEzARBgNVBAoTCkdsb2JhbFNp\n" \
+                      "Z24xEzARBgNVBAMTCkdsb2JhbFNpZ24wHhcNMDkwMzE4MTAwMDAwWhcNMjkwMzE4\n" \
+                      "MTAwMDAwWjBMMSAwHgYDVQQLExdHbG9iYWxTaWduIFJvb3QgQ0EgLSBSMzETMBEG\n" \
+                      "A1UEChMKR2xvYmFsU2lnbjETMBEGA1UEAxMKR2xvYmFsU2lnbjCCASIwDQYJKoZI\n" \
+                      "hvcNAQEBBQADggEPADCCAQoCggEBAMwldpB5BngiFvXAg7aEyiie/QV2EcWtiHL8\n" \
+                      "RgJDx7KKnQRfJMsuS+FggkbhUqsMgUdwbN1k0ev1LKMPgj0MK66X17YUhhB5uzsT\n" \
+                      "gHeMCOFJ0mpiLx9e+pZo34knlTifBtc+ycsmWQ1z3rDI6SYOgxXG71uL0gRgykmm\n" \
+                      "KPZpO/bLyCiR5Z2KYVc3rHQU3HTgOu5yLy6c+9C7v/U9AOEGM+iCK65TpjoWc4zd\n" \
+                      "QQ4gOsC0p6Hpsk+QLjJg6VfLuQSSaGjlOCZgdbKfd/+RFO+uIEn8rUAVSNECMWEZ\n" \
+                      "XriX7613t2Saer9fwRPvm2L7DWzgVGkWqQPabumDk3F2xmmFghcCAwEAAaNCMEAw\n" \
+                      "DgYDVR0PAQH/BAQDAgEGMA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYEFI/wS3+o\n" \
+                      "LkUkrk1Q+mOai97i3Ru8MA0GCSqGSIb3DQEBCwUAA4IBAQBLQNvAUKr+yAzv95ZU\n" \
+                      "RUm7lgAJQayzE4aGKAczymvmdLm6AC2upArT9fHxD4q/c2dKg8dEe3jgr25sbwMp\n" \
+                      "jjM5RcOO5LlXbKr8EpbsU8Yt5CRsuZRj+9xTaGdWPoO4zzUhw8lo/s7awlOqzJCK\n" \
+                      "6fBdRoyV3XpYKBovHd7NADdBj+1EbddTKJd+82cEHhXXipa0095MJ6RMG3NzdvQX\n" \
+                      "mcIfeg7jLQitChws/zyrVQ4PkX4268NXSb7hLi18YIvDQVETI53O9zJrlAGomecs\n" \
+                      "Mx86OyXShkDOOyyGeMlhLxS67ttVb9+E7gUJTb0o2HLO02JQZR7rkpeDMdmztcpH\n" \
+                      "WD9f\n" \
+                      "-----END CERTIFICATE-----\n";
 
 String CToday;
 String CTomorow;
@@ -217,8 +232,6 @@ void setup()
   analogWrite(LED_HC, 0);
   analogWrite(LED_HP, 0);
 
-  server.begin();
-
   disconnectWIFI();
 #ifdef DEBUG
   Serial.println("End of setup, starting loop!");
@@ -228,51 +241,172 @@ void setup()
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Fonction Lecture Tempo
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
-void lect_Tempo()
+String errorDescription(int code, HTTPClient& http)
+// Liste des codes d'erreurs spécifique à l'API RTE ou message général en clair
 {
-  String requeteTempo;                                    // pour l'appel au serveur Particulier EDF
+  switch (code)
+  {
+    case 400: return "Erreur dans la requête";
+    case 401: return "L'authentification a échouée";
+    case 403: return "L’appelant n’est pas habilité à appeler la ressource";
+    case 413: return "La taille de la réponse de la requête dépasse 7Mo";
+    case 414: return "L’URI transmise par l’appelant dépasse 2048 caractères";
+    case 429: return "Le nombre d’appel maximum dans un certain laps de temps est dépassé";
+    case 509: return "L‘ensemble des requêtes des clients atteint la limite maximale";
+    default: break;
+  }
+  return http.errorToString(code);
+}
+
+bool lect_Tempo()
+// ****** Deux requêtes vers l'API de RTE, nécessite que le WiFi soit actif ******
+{
+  int HTTPcode;
+  const char* access_token;
+  String AccessToken;
+  bool requeteOK = true;
+  const char* oauthURI =   "https://digital.iservices.rte-france.com/token/oauth/";
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+#ifdef DEBUG
+    Serial.println("WiFI non disponible. Requête impossible");
+#endif
+    return false;
+  }
+  WiFiClientSecure client;     // on passe en connexion sécurisée (par https...)
   HTTPClient http;
-  int httpCode;
+  client.setCACert(root_ca);   // permet la connexion sécurisée en vérifiant le certificat racine
 
-  byte month_, jour_, hour_;
-  int year_;
-  time_t timestamp = time( NULL );
-  struct tm *pTime = localtime(&timestamp);
+  // ************** Première des deux requêtes pour obtenit un token **************
+  http.begin(client, oauthURI);
 
-  hour_ = pTime->tm_hour;
-  jour_ = pTime->tm_mday;
-  month_ = pTime->tm_mon + 1;
-  year_ = pTime->tm_year + 1900;
+  // Headers nécessaires à la requête
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  http.addHeader("Authorization", idRTE);
 
-  requeteTempo = ("https://particulier.edf.fr/services/rest/referentiel/searchTempoStore?dateRelevant=");
-  requeteTempo += String(year_) + '-' + String(month_) + '-' + String(jour_);
+  // Send HTTP POST request
+  HTTPcode = http.POST(nullptr, 0);
+
+  if (HTTPcode == HTTP_CODE_OK)
+  {
+    String oauthPayload = http.getString();
+#ifdef DEBUG
+    Serial.println("------------ Contenu renvoyé par la requête 1 : ------------");
+    Serial.println(oauthPayload);
+    Serial.println("------------------------------------------------------------\n");
+#endif
+    StaticJsonDocument<192> doc;
+    DeserializationError error = deserializeJson(doc, oauthPayload);
+    if (error)     // cas où il y a un problème dans le contenu renvoyé par la requête
+    {
+#ifdef DEBUG
+      Serial.print("deserializeJson() failed: ");
+      Serial.println(error.c_str());
+#endif
+      access_token = "";
+      requeteOK = false;
+    }
+    else           // cas où le contenu renvoyé par la requête est valide et exploitable
+    {
+      access_token = doc["access_token"];
+      AccessToken = String(access_token);
+#ifdef DEBUG
+      Serial.print("------------ Access token = ");
+      Serial.println(access_token);
+      Serial.print("------------ Access token string = ");
+      Serial.println(AccessToken);
+#endif
+    }
+  }
+  else
+  {
+#ifdef DEBUG
+    Serial.print("erreur HTTP POST: ");
+    Serial.println(errorDescription(HTTPcode, http));
+#endif
+    requeteOK = false;
+  }
+  http.end();
+  if (!requeteOK) return false;
+
+  // ***** Deuxième des deux requêtes pour obtenir la couleur des jours, nécessitant le token *****
+
+  // REMARQUES : l'adresse pour la requête est sous la forme :
+  // https://digital.iservices.rte-france.com/open_api/tempo_like_supply_contract/v1/tempo_like_calendars?start_date=2015-06-08T00:00:00%2B02:00&end_date=2015-06-11T00:00:00%2B02:00
+  // avec (dans notre cas) "start_date" la date du jour et "end_date" la date du jour + 2
+  // Après les "%2B" (signe +) on a le décalage horaire par rapport au temps UTC. On doit obligatoirement avoir "02:00" en heures d'été et "01:00" en heure d'hiver
+  // Les heures de début et de fin peuvent rester à "T00:00:00" pour la requête mais doivent être présentes !
+  // Pour les mois et les jours, les "0" au début peuvent être omis dans le cas de nombres inférieurs à 10
+
+  String requete = "https://digital.iservices.rte-france.com/open_api/tempo_like_supply_contract/v1/tempo_like_calendars?start_date=";
+  requete += String(loc.tm_year + 1900) + "-" + String(loc.tm_mon + 1) + "-" + String(loc.tm_mday) + "T00:00:00%2B0" + String(loc.tm_isdst + 1) + ":00&end_date=" + String(loc2.tm_year + 1900) + "-" + String(loc2.tm_mon + 1) + "-" + String(loc2.tm_mday) + "T00:00:00%2B0" + String(loc2.tm_isdst + 1) + ":00";
+  // Remarque : "loc.tm_isdst" est à 0 en heure d'hiver et à 1 en heure d'été
 
 #ifdef DEBUG
-  Serial.println("*******************************************");
-  Serial.print("Requete Tempo :");          // print a message out in the serial port
-  Serial.println(requeteTempo);
-  Serial.println(hour_);
-  Serial.println("*******************************************");
+  Serial.println("---------------- Adresse pour la requête 2 : ---------------");
+  Serial.println(requete);
+  Serial.println("------------------------------------------------------------\n");
 #endif
-  
-  http.begin(requeteTempo);
-  http.setConnectTimeout(2000);
-  httpCode = http.GET();
-  if (httpCode > 0)
+  http.begin(client, requete);
+
+  String signalsAutorization = "Bearer " + AccessToken;
+#ifdef DEBUG
+  Serial.print("------------ signalsAutorization = ");
+  Serial.println(signalsAutorization);
+#endif
+  // Headers nécessaires à la requête
+  http.addHeader("Authorization", signalsAutorization);
+  http.addHeader("Accept", "application/xml");
+  // Mettre la ligne précédente en remarque pour avoir le résultat en json plutôt qu'en xml
+
+  // On envoie la requête HTTP GET
+  HTTPcode = http.GET();
+
+  if (HTTPcode == HTTP_CODE_OK)
   {
-    if (httpCode == HTTP_CODE_OK)                       // Vérif que la requête s'est bien passée
+    String recup = http.getString();              // "recup" est une chaîne de caractères au format xml
+#ifdef DEBUG
+    Serial.println("------------ Contenu renvoyé par la requête 2 : ------------");
+    Serial.println(recup);
+    Serial.println("------------------------------------------------------------\n");
+#endif
+    // Récupération des couleurs
+    int posi = recup.indexOf("<Couleur>", 100);   // Recherche de la première occurence de la chaîne "<Couleur>"
+    // à partir du 100ème caractère de "recup"
+    if (recup.length() > 200)                     // Si la couleur J+1 est connue le String "recup" fait plus de 200 caractères
     {
-      StaticJsonDocument<100> doc2;
-      deserializeJson(doc2, (http.getString()));
-      CToday   = doc2["couleurJourJ"].as<String>();         // Peut être "TEMPO_BLEU", "TEMPO_BLANC", "TEMPO_ROUGE"
-      CTomorow = doc2["couleurJourJ1"].as<String>();       // Idem ci-dessus
-      // le ".as<String>()" à la fin des requêtes Json transforme la chaîne de caractère du résultat en string
-      // bien plus facile à manipuler
+      CTomorow = (recup.substring(posi + 9, posi + 13)); // Récupération du substring des 4 caractères contenant couleur du lendemain
+      // peut être "BLEU", "BLAN" ou "ROUG"
+      posi = recup.indexOf("<Couleur>", 230);     // Recherche de la deuxième  occurence de la chaîne "<Couleur>"
+      // à partir du 230ème caractère de "recup"
+      CToday = (recup.substring(posi + 9, posi + 13)); // Récupération du substring des 4 caractères contenant la couleur du jour
+      // peut être "BLEU", "BLAN" ou "ROUG"
     }
+    else                                          // cas où la couleur de J+1 n'est pas encore connue
+    {
+      CToday = (recup.substring(posi + 9, posi + 13)); // Récupération du substring des 4 caractères contenant la couleur du jour
+      // peut être "BLEU", "BLAN" ou "ROUG"
+      CTomorow = "NON_DEFINI";
+    }
+#ifdef DEBUG
+    Serial.print("Couleur Tempo du jour : "); Serial.println(CToday);
+    Serial.print("Couleur Tempo de demain : "); Serial.println(CTomorow + "\n");
+#endif
+  }
+  else
+  {
+#ifdef DEBUG
+    Serial.print("erreur HTTP GET: ");
+    Serial.print(HTTPcode);
+    Serial.print(" => ");
+    Serial.println(errorDescription(HTTPcode, http));
+#endif
+    requeteOK = false;
   }
   http.end();
 
-  if ((hour_ >= 6) && (hour_ < 22))
+  if ((loc.tm_hour >= 6) && (loc.tm_hour < 22))
   {
     // Heure_PLEINE
     HpHc = "HEURE_PLEINE";
@@ -282,131 +416,8 @@ void lect_Tempo()
     // Heure_CREUSE
     HpHc = "HEURE_CREUSE";
   }
-}
 
-////////////////////////////////////////////////////////////////////////////////////////////////////////
-//   WEB SERVER
-////////////////////////////////////////////////////////////////////////////////////////////////////////
-void webserver()
-{
-  WiFiClient client = server.available();   // Listen for incoming clients
-
-#ifdef DEBUG
-  Serial.println("Start web server...");          // print a message out in the serial port
-#endif
-
-  if (client)                              // If a new client connects,
-  {
-#ifdef DEBUG
-    Serial.println("New Client.");          // print a message out in the serial port
-#endif
-
-    while (client.connected())
-    { // loop while the client's connected
-      if (client.available())              // if there's bytes to read from the client,
-      {
-        char c = client.read();             // read a byte, then
-#ifdef DEBUG
-        Serial.write(c);                    // print it out the serial monitor
-#endif
-
-        if (c == '\n') {                    // if the byte is a newline character
-
-          lect_Tempo();
-
-          // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
-          // and a content-type so the client knows what's coming, then a blank line:
-          client.println("HTTP/1.1 200 OK");
-          client.println("Content-type:text/html");
-          client.println("Connection: close");
-          client.println();
-
-          // Display the HTML web page
-          client.println("<!DOCTYPE html><html>");
-          client.println("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-          client.println("<link rel=\"icon\" href=\"data:,\">");
-          // CSS to style the on/off buttons
-          // Feel free to change the background-color and font-size attributes to fit your preferences
-          client.println("<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center; }");
-          client.println(".button { background-color: #FF0000; border: black; color: white; padding: 16px 120px;");         // Rouge
-
-          client.println("text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}");
-          client.println(".button2 {background-color: #0000FF; border: black; color: white; padding: 16px 120px;");                                                // Bleu
-
-          client.println("text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}");
-          client.println(".button4 {background-color: #00FF00; border: black; color: black; padding: 16px 120px;");                                                // Vert
-
-          client.println("text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}");
-          client.println(".button5 {background-color: #ff8000; border: black; color: black; padding: 16px 120px;");                                                // Orange
-
-          client.println("text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}");
-          client.println(".button6 {background-color: #BDBDBB; border: black; color: white; padding: 16px 120px;");                                                // Gris
-
-          client.println("text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}");
-          client.println(".button3 {background-color: #FFFFFF; border: black; color: black; padding: 16px 120px;} </style></head>");                               // Blanc
-
-          // Web Page Heading
-          client.println("<body><h1>EDF TEMPO Web Server</h1>");
-
-          if (CToday == "TEMPO_BLEU")
-          {
-            client.println("<p><a href=\\><button class=\"button button2\">TODAY</button></a></p>");
-          }
-          else if (CToday == "TEMPO_BLANC")
-          {
-            client.println("<p><a href=\\><button class=\"button button3\">TODAY</button></a></p>");
-          }
-          else if (CToday == "TEMPO_ROUGE")
-          {
-            client.println("<p><a href=\\><button class=\"button\">TODAY</button></a></p>");
-          }
-          else if (CToday == "NON_DEFINI")
-          {
-            client.println("<p><a href=\\><button class=\"button button6\">TODAY</button></a></p>");
-          }
-
-          if (CTomorow == "TEMPO_BLEU")
-          {
-            client.println("<p><a href=\\><button class=\"button button2\">TOMORROW</button></a></p>");
-          }
-          else if (CTomorow == "TEMPO_BLANC")
-          {
-            client.println("<p><a href=\\><button class=\"button button3\">TOMORROW</button></a></p>");
-          }
-          else if (CTomorow == "TEMPO_ROUGE")
-          {
-            client.println("<p><a href=\\><button class=\"button\">TOMORROW</button></a></p>");
-          }
-          else if (CTomorow == "NON_DEFINI")
-          {
-            client.println("<p><a href=\\><button class=\"button button6\">TOMORROW</button></a></p>");
-          }
-
-          if (HpHc == "HEURE_PLEINE")
-          {
-            client.println("<p><a href=\\><button class=\"button button5\">HEURE PLEINE</button></a></p>");
-          }
-          else if (HpHc == "HEURE_CREUSE")
-          {
-            client.println("<p><a href=\\><button class=\"button button4\">HEURE CREUSE</button></a></p>");
-          }
-
-          client.println("</body></html>");
-          // The HTTP response ends with another blank line
-          client.println();
-          // Break out of the while loop
-          break;
-        }
-      }
-    }
-
-    // Close the connection
-    client.stop();
-#ifdef DEBUG
-    Serial.println("Client disconnected.");
-    Serial.println("");
-#endif
-  }
+  return requeteOK;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -416,104 +427,95 @@ void loop()
 {
   if ((connectWIFI() == true))
   {
-    webserver();
-  }
-
-  // Envoie des données toutes les 5 minutes
-  time_t timestamp = time( NULL );
-  struct tm *pTime = localtime(&timestamp );
-
-  // Envoie des SOH toutes les 5 minutes
-  if ((Actualmin % 5 == 0) && (Actualsec == 0))
-  {
-    if ((connectWIFI() == true))
-    {
-      //timeClient.update();
+    //timeClient.update();
 #ifdef DEBUG
-      Serial.println("############################");
+    Serial.println("############################");
 #define MAX_SIZE 80
-      time_t timestamp = time( NULL );
-      char buffer[MAX_SIZE];
-      struct tm *pTime = localtime(&timestamp );
-      strftime(buffer, MAX_SIZE, "%d/%m/%Y %H:%M:%S", pTime);
-      Serial.println(buffer);
+    time_t timestamp = time( NULL );
+    char buffer[MAX_SIZE];
+    struct tm *pTime = localtime(&timestamp );
+    strftime(buffer, MAX_SIZE, "%d/%m/%Y %H:%M:%S", pTime);
+    Serial.println(buffer);
 #endif
 
-      //PreviousSOH = ActualSOH;
-      lect_Tempo();
+    // Définition de la date et de l'heure actuelles
+    moment = time(NULL);            // Mise de la date et de l'heure au format unix dans la variable "moment" de type time_m
+    loc = *(localtime(&moment));    // Mise dans la structure loc des éléments de date et de l'heure
+    // Définition de la date et de l'heure de dans 2 jours (172800 = 2 jours en secondes)
+    moment = moment + 172800;       // Mise de la date et de heure de dans 2 jours au format unix dans la variable "moment" de type time_m
+    loc2 = *(localtime(&moment));   // Mise dans la structure loc2 des éléments de date et de l'heure de dans 2 jours
 
-#ifdef DEBUG
-      Serial.println("############################");
-      Serial.print("Aujourd'hui = ");
-      Serial.print(CToday);
-      Serial.print(", demain = ");
-      Serial.println(CTomorow);
-      Serial.print("Heure pleine/Heure creuse = ");
-      Serial.println(HpHc);
-      Serial.println("############################");
-#endif
+    //PreviousSOH = ActualSOH;
+    lect_Tempo();
 
-      if (CToday == "TEMPO_BLEU")         {
-        analogWrite(LED_TODAY_BLEU, 255 * brightness / 100);
-        analogWrite(LED_TODAY_BLANC, 0);
-        analogWrite(LED_TODAY_ROUGE, 0);
-      }
-      else if (CToday == "TEMPO_BLANC")   {
-        analogWrite(LED_TODAY_BLEU, 0);
-        analogWrite(LED_TODAY_BLANC, 255 * brightness / 100);
-        analogWrite(LED_TODAY_ROUGE, 0);
-      }
-      else if (CToday == "TEMPO_ROUGE")   {
-        analogWrite(LED_TODAY_BLEU, 0);
-        analogWrite(LED_TODAY_BLANC, 0);
-        analogWrite(LED_TODAY_ROUGE, 255 * brightness / 100);
-      }
-      else if (CToday == "NON_DEFINI")  {
-        analogWrite(LED_TODAY_BLEU, 0);
-        analogWrite(LED_TODAY_BLANC, 0);
-        analogWrite(LED_TODAY_ROUGE, 0);
-      }
+    Serial.println("############################");
+    Serial.print("Aujourd'hui = ");
+    Serial.print(CToday);
+    Serial.print(", demain = ");
+    Serial.println(CTomorow);
+    Serial.print("Heure pleine/Heure creuse = ");
+    Serial.println(HpHc);
+    Serial.println("############################");
 
-      if (CTomorow == "TEMPO_BLEU")       {
-        analogWrite(LED_TOMOR_BLEU, 255 * brightness / 100);
-        analogWrite(LED_TOMOR_BLANC, 0);
-        analogWrite(LED_TOMOR_ROUGE, 0);
-      }
-      else if (CTomorow == "TEMPO_BLANC") {
-        analogWrite(LED_TOMOR_BLEU, 0);
-        analogWrite(LED_TOMOR_BLANC, 255 * brightness / 100);
-        analogWrite(LED_TOMOR_ROUGE, 0);
-      }
-      else if (CTomorow == "TEMPO_ROUGE") {
-        analogWrite(LED_TOMOR_BLEU, 0);
-        analogWrite(LED_TOMOR_BLANC, 0);
-        analogWrite(LED_TOMOR_ROUGE, 255 * brightness / 100);
-      }
-      else if (CTomorow == "NON_DEFINI")  {
-        analogWrite(LED_TOMOR_BLEU, 0);
-        analogWrite(LED_TOMOR_BLANC, 0);
-        analogWrite(LED_TOMOR_ROUGE, 0);
-      }
-
-      if (HpHc == "HEURE_PLEINE")         {
-        analogWrite(LED_HC, 0);
-        analogWrite(LED_HP, 255 * brightness / 100);
-      }
-      else if (HpHc == "HEURE_CREUSE")    {
-        analogWrite(LED_HC, 255 * brightness / 100);
-        analogWrite(LED_HP, 0);
-      }
-
-#ifdef DEBUG
-      Serial.print("Disconnect WIFI and enter light sleep for ");
-      Serial.println("s.");
-      //delay(1000);
-#endif
-      disconnectWIFI();
+    // "BLEU", "BLAN" ou "ROUG"
+    if (CToday == "BLEU")         {
+      analogWrite(LED_TODAY_BLEU, 255 * brightness / 100);
+      analogWrite(LED_TODAY_BLANC, 0);
+      analogWrite(LED_TODAY_ROUGE, 0);
     }
+    else if (CToday == "BLAN")   {
+      analogWrite(LED_TODAY_BLEU, 0);
+      analogWrite(LED_TODAY_BLANC, 255 * brightness / 100);
+      analogWrite(LED_TODAY_ROUGE, 0);
+    }
+    else if (CToday == "ROUG")   {
+      analogWrite(LED_TODAY_BLEU, 0);
+      analogWrite(LED_TODAY_BLANC, 0);
+      analogWrite(LED_TODAY_ROUGE, 255 * brightness / 100);
+    }
+    else if (CToday == "NON_DEFINI")  {
+      analogWrite(LED_TODAY_BLEU, 0);
+      analogWrite(LED_TODAY_BLANC, 0);
+      analogWrite(LED_TODAY_ROUGE, 0);
+    }
+
+    if (CTomorow == "BLEU")       {
+      analogWrite(LED_TOMOR_BLEU, 255 * brightness / 100);
+      analogWrite(LED_TOMOR_BLANC, 0);
+      analogWrite(LED_TOMOR_ROUGE, 0);
+    }
+    else if (CTomorow == "BLAN") {
+      analogWrite(LED_TOMOR_BLEU, 0);
+      analogWrite(LED_TOMOR_BLANC, 255 * brightness / 100);
+      analogWrite(LED_TOMOR_ROUGE, 0);
+    }
+    else if (CTomorow == "ROUG") {
+      analogWrite(LED_TOMOR_BLEU, 0);
+      analogWrite(LED_TOMOR_BLANC, 0);
+      analogWrite(LED_TOMOR_ROUGE, 255 * brightness / 100);
+    }
+    else if (CTomorow == "NON_DEFINI")  {
+      analogWrite(LED_TOMOR_BLEU, 0);
+      analogWrite(LED_TOMOR_BLANC, 0);
+      analogWrite(LED_TOMOR_ROUGE, 0);
+    }
+
+    if (HpHc == "HEURE_PLEINE")         {
+      analogWrite(LED_HC, 0);
+      analogWrite(LED_HP, 255 * brightness / 100);
+    }
+    else if (HpHc == "HEURE_CREUSE")    {
+      analogWrite(LED_HC, 255 * brightness / 100);
+      analogWrite(LED_HP, 0);
+    }
+
+#ifdef DEBUG
+    Serial.print("Disconnect WIFI and enter light sleep for ");
+    Serial.println("s.");
+#endif
+
+    disconnectWIFI();
   }
 
-  Actualmin = pTime->tm_min;
-  Actualsec = pTime->tm_sec;
-  delay(1000);
+  delay(1000 * 300);
 }
